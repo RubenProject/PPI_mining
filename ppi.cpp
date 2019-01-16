@@ -20,6 +20,9 @@ igraph_strvector_t v_names;
 igraph_strvector_t a_names;
 igraph_vector_t a_idx;
 
+//prototypes
+void display_score(FILE *file);
+
 //XXX: DEPRECATED
 void create_graph_2(){
     FILE *fp_el;
@@ -98,7 +101,7 @@ igraph_t create_graph(){
     }
     /* important */
     igraph_i_set_attribute_table(&igraph_cattribute_table);
-    igraph_read_graph_ncol(&g, fp_el, NULL, 1, IGRAPH_ADD_WEIGHTS_YES, IGRAPH_UNDIRECTED);
+    igraph_read_graph_ncol(&g, fp_el, NULL, 1, IGRAPH_ADD_WEIGHTS_YES, IGRAPH_DIRECTED);
     return g;
 }
 
@@ -187,14 +190,83 @@ igraph_vector_t get_associate_idx(){
 
 /*main function that calculates score*/
 void mine_graph(){
-    int i;
+    int i, j, k, idx, nwalks, nsteps;
+    igraph_vector_t neis, p_neis, history;
+    igraph_integer_t vid, nid, eid, weight, hist_size; 
+    double tot_weight, p, init_score, v_score, share;
 
+    igraph_vector_init(&score, vcount);
     a_names = get_associate_names();
     a_idx = get_associate_idx();
 
+    /* pagerank */
+    hist_size = 100;
+    igraph_vector_init(&neis, 0);
+    igraph_vector_init(&history, hist_size);
+    srand(42);
+    nwalks = 10000;
+    nsteps = 1000;
+    init_score = 100.0;
+    share = 0.0001;
+    /* init associated proteins */
     for (i = 0; i < acount; i++){
-        //do some action for all associate genes
-        //printf("%s\n", STR(a_names, i));
+        idx =(int)VECTOR(a_idx)[i]; 
+        if (idx >= 0)
+            VECTOR(score)[idx] = init_score;
+    }
+    for (i = 0; i < nwalks; i++){
+        /* init random walk from random vertex*/
+        vid = rand() % vcount;
+        igraph_vector_fill(&history, -1);
+        printf("iteration: %i\n starting at v: %i\n", i, vid);
+        for (j = 0; j < nsteps; j++){
+            /* select next vertex and score nieghbours*/
+            igraph_neighbors(&graph, &neis, vid, IGRAPH_OUT);
+            /* no neighbours */
+            if (igraph_vector_size(&neis) == 0)
+                break;
+            v_score = VECTOR(score)[vid];
+            tot_weight = 0;
+            /* proportional selection */
+            for (k = 0; k < igraph_vector_size(&neis); k++){
+                nid = VECTOR(neis)[k]; 
+                igraph_get_eid(&graph, &eid, vid, nid, 1, 0);
+                weight = EAN(&graph, "weight", eid);
+                VECTOR(score)[nid] += share * weight * v_score;
+                if (!igraph_vector_contains(&history, nid)){
+                    tot_weight += weight;
+                } else {
+                    VECTOR(neis)[k] = -1; 
+                }
+            }
+
+            igraph_vector_init(&p_neis, igraph_vector_size(&neis));
+            for (k = 0; k < igraph_vector_size(&neis); k++){
+                nid = VECTOR(neis)[k]; 
+                if (nid == -1){
+                    if (k > 0)
+                        VECTOR(p_neis)[k] = VECTOR(p_neis)[k-1];
+                    else
+                        VECTOR(p_neis)[k] = 0;
+                } else {
+                    igraph_get_eid(&graph, &eid, vid, nid, 1, 0);
+                    weight = EAN(&graph, "weight", eid);
+                    VECTOR(p_neis)[k] = weight / tot_weight;
+                    if (k > 0){
+                        VECTOR(p_neis)[k] += VECTOR(p_neis)[k-1];
+                    }
+                }
+            }
+            /* spin the wheel */
+            p = (double)rand() / RAND_MAX;
+            k = 0;
+            while (p > VECTOR(p_neis)[k]){
+                k++;
+            }
+            nid = VECTOR(neis)[k];
+            VECTOR(history)[j % hist_size] = vid;
+            vid = nid;
+        }
     }
 }
 
@@ -206,20 +278,56 @@ void init(){
     vcount = igraph_vcount(&graph);
     ecount = igraph_ecount(&graph);
     acount = 106; /* counted from file */
-    igraph_vector_init(&score, vcount);
     igraph_strvector_init(&v_names, vcount);
     for (i = 0; i < vcount; i++){
         igraph_strvector_set(&v_names, i, VAS(&graph, "name", i));
     }
-    /*XXX:weights could be similarly queried for easy manual use */
+}
+
+int sort_score(igraph_strvector_t names, igraph_vector_t score){
+    int i, j, k, n;
+    double t0;
+    char *t1;
+    /* 100 chars should be plenty */
+    t1 = (char *)malloc(100 * sizeof(char));
+    if (igraph_vector_size(&score) != igraph_strvector_size(&names)){
+        printf("size mismatch\n");
+        return 0;
+    }
+    n = igraph_vector_size(&score);
+    for (i = 0; i < n - 1; i++) {
+        k = i;
+
+        /* Find element with smallest time */
+        for (j = i + 1; j < n; j++) {
+            if (VECTOR(score)[j] > VECTOR(score)[k]) {
+                k = j;
+            }
+        }
+
+        /* Swap k-th and i-th element */
+        if (k != i) {
+            t0 = VECTOR(score)[k];
+            strcpy(t1, STR(names, k));
+
+            VECTOR(score)[k] = VECTOR(score)[i];
+            VECTOR(score)[i] = t0;
+
+            igraph_strvector_set(&names, k, STR(names, i));
+            igraph_strvector_set(&names, i, t1);
+        }
+    }
+    return 1;
 }
 
 /*show top 100*/
-void display_score(){
+void display_score(FILE *file){
     int i;
-    /* TODO: disiplay only highest scores: sort and save index*/
+    if (!sort_score(v_names, score)){
+        return;
+    }
     for (i = 0; i < 100; i++){
-        printf("%i\n", (int)VECTOR(score)[i]);
+        fprintf(file, "%s : %i\n", STR(a_names, i), (int)VECTOR(score)[i]);
     }
 }
 
@@ -228,7 +336,7 @@ int main(void){
     init();
     //basic_stats();
     mine_graph();
-    //display_score();
+    display_score(stdout);
     /* TODO not all objects are destroyed */
     igraph_destroy(&graph);
     igraph_strvector_destroy(&a_names);
